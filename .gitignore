@@ -1,0 +1,13 @@
+# build output
+dist/
+*.exe
+*.out
+
+# go
+*.test
+*.prof
+
+# editor
+.DS_Store
+.idea/
+.vscode/
