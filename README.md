@@ -10,6 +10,6 @@
  - CLI will download the latest release
  - CLI unpackages tarballs
  - CLI will replace the existing binary
-   - Restart?
-   - Replacement strategy?
+   - Non windows OS inplace update
+   - Windows temp file update 
  - CLI with latest binary runs 
