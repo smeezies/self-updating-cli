@@ -31,7 +31,7 @@ type githubAsset struct {
 }
 
 // CheckAndUpdate fetches the latest GitHub Release and applies it if newer
-// than the running binary. It is safe to call from a background goroutine.
+// than the running binary. Safe to call from a background goroutine.
 func CheckAndUpdate(currentVersion string) error {
 	release, err := fetchLatestRelease()
 	if err != nil {
@@ -52,12 +52,14 @@ func CheckAndUpdate(currentVersion string) error {
 		return fmt.Errorf("finding executable: %w", err)
 	}
 
-	// resolve symlinks so we get the real path on disk
+	// resolve symlinks to get the real path on disk
 	exePath, err = filepath.EvalSymlinks(exePath)
 	if err != nil {
 		return fmt.Errorf("resolving executable path: %w", err)
 	}
 
+	// destination dir must be the same filesystem as the binary so
+	// os.Rename works without crossing device boundaries
 	destDir := filepath.Dir(exePath)
 
 	binaryURL, checksumURL, err := findAssetURLs(release)
@@ -65,20 +67,23 @@ func CheckAndUpdate(currentVersion string) error {
 		return fmt.Errorf("finding assets: %w", err)
 	}
 
+	// download archive, verify checksum, extract binary into destDir
 	tmpFile, err := downloadAndExtractBinary(binaryURL, checksumURL, destDir)
 	if err != nil {
 		return fmt.Errorf("downloading binary: %w", err)
 	}
-	defer os.Remove(tmpFile)
+	defer os.Remove(tmpFile) // no-op if applyUpdate renamed it away
 
 	if err := os.Chmod(tmpFile, 0755); err != nil {
 		return fmt.Errorf("setting permissions: %w", err)
 	}
 
+	// back up current binary before replacing
 	if err := CopyFile(exePath, exePath+".bak"); err != nil {
 		return fmt.Errorf("creating backup: %w", err)
 	}
 
+	// platform-specific atomic replace + re-exec
 	return applyUpdate(exePath, tmpFile)
 }
 
@@ -111,7 +116,7 @@ func fetchLatestRelease() (*githubRelease, error) {
 }
 
 // findAssetURLs locates the binary archive and SHA256SUMS file for the
-// current OS and architecture within a GitHub Release's asset list.
+// current OS and architecture in the release asset list.
 func findAssetURLs(release *githubRelease) (binaryURL, checksumURL string, err error) {
 	osPart := runtime.GOOS
 	archPart := runtime.GOARCH
@@ -134,11 +139,11 @@ func findAssetURLs(release *githubRelease) (binaryURL, checksumURL string, err e
 	return binaryURL, checksumURL, nil
 }
 
-// downloadAndExtractBinary downloads the tar.gz archive, verifies its SHA-256
-// checksum against SHA256SUMS, then extracts the binary to a temp file.
-// Returns the path to the extracted binary temp file.
-func downloadAndExtractBinary(binaryURL, checksumURL string, destDir string) (string, error) {
-	// download archive to a temp file (can stay in /tmp, just for download+verify)
+// downloadAndExtractBinary downloads the tar.gz archive to /tmp, verifies its
+// SHA-256 checksum, then extracts the binary into destDir (same filesystem as
+// the running binary so os.Rename works without crossing device boundaries).
+func downloadAndExtractBinary(binaryURL, checksumURL, destDir string) (string, error) {
+	// download archive to /tmp for verification (cross-device is fine here)
 	resp, err := http.Get(binaryURL)
 	if err != nil {
 		return "", fmt.Errorf("downloading archive: %w", err)
@@ -158,16 +163,17 @@ func downloadAndExtractBinary(binaryURL, checksumURL string, destDir string) (st
 	}
 	archiveTmp.Close()
 
+	// verify checksum before extracting
 	if err := verifyChecksum(archivePath, checksumURL); err != nil {
 		return "", err
 	}
 
-	// extract into destDir so rename stays on the same filesystem
+	// extract binary into destDir so the subsequent os.Rename stays on one filesystem
 	return extractBinaryFromArchive(archivePath, destDir)
 }
 
-// verifyChecksum computes the SHA-256 of filePath and confirms it appears in
-// the SHA256SUMS file served at checksumURL.
+// verifyChecksum computes the SHA-256 of filePath and confirms it appears
+// in the SHA256SUMS file fetched from checksumURL.
 func verifyChecksum(filePath, checksumURL string) error {
 	resp, err := http.Get(checksumURL)
 	if err != nil {
@@ -198,9 +204,10 @@ func verifyChecksum(filePath, checksumURL string) error {
 	return nil
 }
 
-// extractBinaryFromArchive opens a .tar.gz file and extracts the first entry
-// that looks like a binary (no extension, or .exe on Windows) to a temp file.
-func extractBinaryFromArchive(archivePath string) (string, error) {
+// extractBinaryFromArchive opens a .tar.gz and extracts the first entry that
+// looks like a binary into destDir. Using destDir (same fs as the exe) avoids
+// cross-device rename errors when applyUpdate calls os.Rename.
+func extractBinaryFromArchive(archivePath, destDir string) (string, error) {
 	f, err := os.Open(archivePath)
 	if err != nil {
 		return "", err
@@ -223,12 +230,10 @@ func extractBinaryFromArchive(archivePath string) (string, error) {
 			return "", fmt.Errorf("reading tar: %w", err)
 		}
 
-		// skip directories and metadata files
 		if hdr.Typeflag != tar.TypeReg {
 			continue
 		}
 
-		// match the binary: no path separator, no dot extension (or .exe)
 		base := hdr.Name
 		if idx := strings.LastIndex(base, "/"); idx >= 0 {
 			base = base[idx+1:]
@@ -240,7 +245,8 @@ func extractBinaryFromArchive(archivePath string) (string, error) {
 			continue
 		}
 
-		tmp, err := os.CreateTemp("", "update-binary-*")
+		// temp file lives in destDir so os.Rename in applyUpdate is same-device
+		tmp, err := os.CreateTemp(destDir, "update-binary-*")
 		if err != nil {
 			return "", err
 		}
@@ -257,8 +263,7 @@ func extractBinaryFromArchive(archivePath string) (string, error) {
 	return "", fmt.Errorf("no binary found in archive %s", archivePath)
 }
 
-// CopyFile copies src to dst, creating dst if it does not exist.
-// Exported so cmd/app/main.go can use it for the Windows finalization step.
+// CopyFile copies src to dst. Exported for use in the Windows finalization path.
 func CopyFile(src, dst string) error {
 	in, err := os.Open(src)
 	if err != nil {

@@ -9,10 +9,10 @@ import (
 )
 
 // applyUpdate handles the Windows constraint that a running executable cannot
-// be overwritten. Instead we:
+// be overwritten. Steps:
 //  1. Move the downloaded binary to <exe>.new alongside the running exe.
-//  2. Launch <exe>.new with a --finalize-update flag pointing at the real path.
-//  3. Exit the current process so Windows releases the file handle.
+//  2. Launch <exe>.new with --finalize-update pointing at the real path.
+//  3. Exit so Windows releases the file handle on the running exe.
 //
 // The new process (cmd/app/main.go) detects the flag, copies itself over the
 // real path, re-launches from there, and cleans up the .new file.
@@ -32,12 +32,10 @@ func applyUpdate(exePath, tmpFile string) error {
 	}
 
 	if err := cmd.Start(); err != nil {
-		// roll back: remove the .new file so we don't leave debris
 		os.Remove(newPath)
 		return err
 	}
 
-	// Detach and exit so Windows releases the handle on the running exe.
 	os.Exit(0)
 	return nil
 }
