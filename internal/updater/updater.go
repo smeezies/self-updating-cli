@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 )
@@ -51,28 +52,33 @@ func CheckAndUpdate(currentVersion string) error {
 		return fmt.Errorf("finding executable: %w", err)
 	}
 
+	// resolve symlinks so we get the real path on disk
+	exePath, err = filepath.EvalSymlinks(exePath)
+	if err != nil {
+		return fmt.Errorf("resolving executable path: %w", err)
+	}
+
+	destDir := filepath.Dir(exePath)
+
 	binaryURL, checksumURL, err := findAssetURLs(release)
 	if err != nil {
 		return fmt.Errorf("finding assets: %w", err)
 	}
 
-	// download archive, verify checksum, extract binary to temp file
-	tmpFile, err := downloadAndExtractBinary(binaryURL, checksumURL)
+	tmpFile, err := downloadAndExtractBinary(binaryURL, checksumURL, destDir)
 	if err != nil {
 		return fmt.Errorf("downloading binary: %w", err)
 	}
-	defer os.Remove(tmpFile) // no-op if applyUpdate succeeds on Unix (file was renamed)
+	defer os.Remove(tmpFile)
 
 	if err := os.Chmod(tmpFile, 0755); err != nil {
 		return fmt.Errorf("setting permissions: %w", err)
 	}
 
-	// back up current binary before replacing
 	if err := CopyFile(exePath, exePath+".bak"); err != nil {
 		return fmt.Errorf("creating backup: %w", err)
 	}
 
-	// platform-specific atomic replace + re-exec (see updater_unix.go / updater_windows.go)
 	return applyUpdate(exePath, tmpFile)
 }
 
@@ -131,8 +137,8 @@ func findAssetURLs(release *githubRelease) (binaryURL, checksumURL string, err e
 // downloadAndExtractBinary downloads the tar.gz archive, verifies its SHA-256
 // checksum against SHA256SUMS, then extracts the binary to a temp file.
 // Returns the path to the extracted binary temp file.
-func downloadAndExtractBinary(binaryURL, checksumURL string) (string, error) {
-	// 1. download the archive to a temp file so we can verify it before extracting
+func downloadAndExtractBinary(binaryURL, checksumURL string, destDir string) (string, error) {
+	// download archive to a temp file (can stay in /tmp, just for download+verify)
 	resp, err := http.Get(binaryURL)
 	if err != nil {
 		return "", fmt.Errorf("downloading archive: %w", err)
@@ -152,13 +158,12 @@ func downloadAndExtractBinary(binaryURL, checksumURL string) (string, error) {
 	}
 	archiveTmp.Close()
 
-	// 2. verify SHA-256 of the archive against SHA256SUMS
 	if err := verifyChecksum(archivePath, checksumURL); err != nil {
 		return "", err
 	}
 
-	// 3. extract the binary from the archive
-	return extractBinaryFromArchive(archivePath)
+	// extract into destDir so rename stays on the same filesystem
+	return extractBinaryFromArchive(archivePath, destDir)
 }
 
 // verifyChecksum computes the SHA-256 of filePath and confirms it appears in
