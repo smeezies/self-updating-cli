@@ -12,6 +12,7 @@ permissions:
 jobs:
   goreleaser:
     runs-on: ubuntu-latest
+    environment: default 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
