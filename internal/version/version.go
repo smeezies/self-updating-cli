@@ -1,4 +1,4 @@
 package version
 
-// Fall back to "dev" for local builds
-var Version = "dev"
+// Fall back to "local" for local builds
+var Version = "local"
